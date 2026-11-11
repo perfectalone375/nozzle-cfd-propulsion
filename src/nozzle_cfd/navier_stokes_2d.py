@@ -706,9 +706,8 @@ def _solve_axisymmetric_ns2d_python(
     a1 = 0.5 * ((x1 - x0) * (r2 - r0) - (r1 - r0) * (x2 - x0))
     a2 = 0.5 * ((x2 - x0) * (r3 - r0) - (r2 - r0) * (x3 - x0))
     area = np.maximum(1e-18, a1 + a2)
-    rg = np.maximum(
-        1e-9, (a1 * (r0 + r1 + r2) / 3.0 + a2 * (r0 + r2 + r3) / 3.0) / area
-    )
+    rg_num = a1 * (r0 + r1 + r2) / 3.0 + a2 * (r0 + r2 + r3) / 3.0
+    rg = np.maximum(1e-9, rg_num / area)
     xc = (a1 * (x0 + x1 + x2) / 3.0 + a2 * (x0 + x2 + x3) / 3.0) / area
     vol = rg * area
 
