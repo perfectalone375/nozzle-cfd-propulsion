@@ -1,0 +1,66 @@
+name: Multi-Language CFD & Propulsion CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  python-cfd-matrix:
+    name: Python CFD, Thermochemistry & MCP (${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install package with dev tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Ruff Lint & Format Check
+        run: |
+          ruff check .
+          ruff format --check .
+
+      - name: Run Pytest Verification Suite
+        run: pytest tests
+
+  cpp17-high-speed-cfd:
+    name: C++17 MacCormack Solver Benchmark (g++ -O3)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compile C++17 CFD Kernel & Run Shock Verification
+        working-directory: cpp
+        run: |
+          make test
+
+  matlab-octave-validation:
+    name: MATLAB / GNU Octave (.m) Solver Suite
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install GNU Octave
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends octave
+
+      - name: Execute MATLAB/Octave CFD, Trade Study & 2D MOC Scripts
+        run: |
+          octave --no-gui matlab/solve_nozzle_cfd_maccormack.m
+          octave --no-gui matlab/propellant_trade_study.m
+          octave --no-gui matlab/moc_minimum_length_nozzle.m
