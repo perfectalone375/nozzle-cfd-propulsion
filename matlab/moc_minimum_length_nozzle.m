@@ -19,7 +19,9 @@ fprintf('Design Exit Mach: %.2f | Prandtl-Meyer Angle nu(M): %.2f deg | MLN Max 
     M_design, nu_exit_deg, theta_max_deg);
 
 n_char = 8;
-d_theta = theta_max_deg / n_char;
+theta_fan_max = min(16.0, 0.5 * theta_max_deg);
+d_theta = theta_fan_max / n_char;
+r_fillet = 0.382 * rt;
 
 fprintf('%-6s | %-8s | %-10s | %-10s | %-10s\n', 'Ray #', 'Theta', 'Mach', 'mu [deg]', 'x_CL/Rt');
 fprintf('%s\n', repmat('-', 1, 56));
@@ -27,9 +29,9 @@ fprintf('%s\n', repmat('-', 1, 56));
 x_cl_prev = 0.0;
 for i = 1:n_char
     theta_i = i * d_theta;
-    nu_target_rad = deg2rad(2.0 * theta_i);
+    nu_target_rad = deg2rad(theta_i);
 
-    % Invert Prandtl-Meyer nu(M) = nu_target via bisection
+    % Invert Prandtl-Meyer nu(M) = nu_target along throat arc via bisection
     lo = 1.0001; hi = 8.0;
     for b = 1:50
         mid = 0.5 * (lo + hi);
@@ -42,8 +44,10 @@ for i = 1:n_char
     end
     M_i = 0.5 * (lo + hi);
     mu_deg = rad2deg(asin(1.0 / M_i));
+    x_wall = r_fillet * sin(deg2rad(theta_i));
+    r_wall = rt + r_fillet * (1.0 - cos(deg2rad(theta_i)));
     slope_cm = tan(deg2rad(theta_i - mu_deg));
-    x_cl = -rt / min(-0.05, slope_cm);
+    x_cl = x_wall - r_wall / slope_cm;
 
     fprintf('%-6d | %7.2f  | %8.4f | %8.2f  | %8.3f\n', i, theta_i, M_i, mu_deg, x_cl / rt);
     assert(x_cl > x_cl_prev, 'Characteristic centerline intercepts must march downstream monotonically');

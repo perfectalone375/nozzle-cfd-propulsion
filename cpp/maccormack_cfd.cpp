@@ -18,8 +18,8 @@ struct SolverConfig {
     double pa_kpa = 101.325;
     double eps = 12.0;
     double rt_m = 0.12;
-    int nx = 161;
-    int max_iter = 6000;
+    int nx = 121;
+    int max_iter = 15000;
     double cfl = 0.45;
     double tol = 1e-6;
     bool json_out = false;
@@ -102,7 +102,7 @@ int main(int argc, char* argv[]) {
     double p_e_shocked = p_e_sup * (1.0 + (2.0 * gam / gp1) * (m_e_sup * m_e_sup - 1.0));
     bool subsonic_outflow = pa_pa > p_e_shocked;
     double pb_nd = pa_pa / pc_pa;
-    double cx = subsonic_outflow ? 0.30 : 0.08;
+    double cx = subsonic_outflow ? 0.34 : 0.08;
 
     std::vector<double> U1(n), U2(n), U3(n);
     for (int i = 0; i < n; ++i) {
