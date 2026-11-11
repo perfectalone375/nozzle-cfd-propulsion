@@ -11,6 +11,10 @@ from nozzle_cfd.cfd_solver import solve_quasi1d_maccormack
 from nozzle_cfd.cooling import analyze_bartz_cooling
 from nozzle_cfd.geometry import build_rao_bell_nozzle
 from nozzle_cfd.moc_2d import simulate_2d_nozzle_and_plume
+from nozzle_cfd.navier_stokes_2d import (
+    build_conical_nozzle_geometry,
+    solve_axisymmetric_navier_stokes_2d,
+)
 from nozzle_cfd.propellants import (
     PROPELLANTS,
     evaluate_propellant_performance,
@@ -69,7 +73,8 @@ MCP_TOOLS: list[dict[str, Any]] = [
     {
         "name": "simulate_2d_plume",
         "description": (
-            "Compute 2D Method of Characteristics rays and plume shock-diamond wavelength."
+            "Compute true 2D Axisymmetric curvilinear Euler/Navier-Stokes coupled nozzle + exhaust "
+            "plume shock diamonds, curved sonic line, and MOC characteristic rays."
         ),
         "inputSchema": {
             "type": "object",
@@ -78,6 +83,11 @@ MCP_TOOLS: list[dict[str, Any]] = [
                 "chamber_pressure_mpa": {"type": "number", "default": 10.0},
                 "ambient_pressure_kpa": {"type": "number", "default": 101.325},
                 "expansion_ratio": {"type": "number", "default": 12.0},
+                "viscous_mode": {
+                    "type": "string",
+                    "enum": ["euler", "laminar", "turbulent"],
+                    "default": "euler",
+                },
             },
         },
     },
@@ -121,6 +131,34 @@ MCP_TOOLS: list[dict[str, Any]] = [
                     "enum": ["minmod", "van_leer"],
                     "default": "van_leer",
                 },
+            },
+        },
+    },
+    {
+        "name": "run_2d_navier_stokes",
+        "description": (
+            "Run true 2D Axisymmetric curvilinear Finite-Volume Euler/Laminar/Turbulent "
+            "Navier-Stokes solver (with C++20/OpenMP acceleration) for Rao bell or JPL 45-15 "
+            "transonic discharge Cd, curved sonic line, viscous separation, and Schlieren."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "propellant": {"type": "string", "default": "METHALOX"},
+                "nozzle_type": {
+                    "type": "string",
+                    "enum": ["rao_bell", "jpl_45_15"],
+                    "default": "rao_bell",
+                },
+                "chamber_pressure_mpa": {"type": "number", "default": 10.0},
+                "ambient_pressure_kpa": {"type": "number", "default": 101.325},
+                "expansion_ratio": {"type": "number", "default": 12.0},
+                "viscous_mode": {
+                    "type": "string",
+                    "enum": ["euler", "laminar", "turbulent"],
+                    "default": "turbulent",
+                },
+                "include_plume": {"type": "boolean", "default": False},
             },
         },
     },
@@ -183,11 +221,22 @@ def _call_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
         pc = float(args.get("chamber_pressure_mpa", 10.0))
         pa = float(args.get("ambient_pressure_kpa", 101.325))
         eps = float(args.get("expansion_ratio", 12.0))
+        viscous_mode = str(args.get("viscous_mode", "euler")).lower()
         geom = build_rao_bell_nozzle(expansion_ratio=eps, n_points=101)
         cfd = solve_quasi1d_maccormack(geom, prop, pc, pa)
-        plume = simulate_2d_nozzle_and_plume(geom, cfd)
+        plume = simulate_2d_nozzle_and_plume(geom, cfd, viscous_mode=viscous_mode)
         return {
             "grid_shape": list(plume.mach_2d.shape),
+            "solver_backend": plume.solver_backend,
+            "solve_ms": round(plume.solve_ms, 2),
+            "discharge_coefficient_cd": plume.discharge_coefficient_cd,
+            "mass_conservation_error_pct": (
+                round(plume.ns2d_result.mass_conservation_error_pct, 5)
+                if plume.ns2d_result is not None
+                else None
+            ),
+            "mach_disc_detected": plume.mach_disc_detected,
+            "separation_detected": plume.separation_detected,
             "shock_diamond_wavelength_m": plume.shock_diamond_wavelength_m,
             "fully_expanded_mach": plume.fully_expanded_mach,
             "prandtl_meyer_exit_deg": plume.prandtl_meyer_exit_deg,
@@ -242,6 +291,66 @@ def _call_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
             grid_sizes=(81, 161, 321),
         )
         return gci.to_dict()
+    if name == "run_2d_navier_stokes":
+        prop = str(args.get("propellant", "METHALOX"))
+        noz_type = str(args.get("nozzle_type", "rao_bell")).lower()
+        pc = float(args.get("chamber_pressure_mpa", 10.0))
+        pa = float(args.get("ambient_pressure_kpa", 101.325))
+        eps = float(args.get("expansion_ratio", 12.0))
+        viscous_mode = str(args.get("viscous_mode", "turbulent")).lower()
+        include_plume = bool(args.get("include_plume", False))
+        if noz_type == "jpl_45_15":
+            geom = build_conical_nozzle_geometry(
+                throat_radius_m=0.05,
+                contraction_ratio=3.0,
+                expansion_ratio=eps if "expansion_ratio" in args else 4.0,
+                conv_half_angle_deg=45.0,
+                div_half_angle_deg=15.0,
+                throat_rc_ratio=0.625,
+                n_points=101,
+            )
+            if "propellant" not in args:
+                prop = "COLD_GAS_N2"
+        else:
+            geom = build_rao_bell_nozzle(expansion_ratio=eps, n_points=101)
+        res = solve_axisymmetric_navier_stokes_2d(
+            geom,
+            propellant_key=prop,
+            chamber_pressure_mpa=pc,
+            ambient_pressure_kpa=pa,
+            viscous_mode=viscous_mode,
+            nx1=64,
+            nr1=22,
+            include_plume=include_plume,
+            nx2=80,
+            max_iters=1800,
+        )
+        return {
+            "nozzle_type": noz_type,
+            "propellant": res.propellant,
+            "viscous_mode": res.viscous_mode,
+            "solver_backend": res.solver_backend,
+            "n_threads": res.n_threads,
+            "solve_ms": round(res.solve_ms, 2),
+            "iterations": res.iterations,
+            "converged": res.converged,
+            "discharge_coefficient_cd": round(res.discharge_coefficient_cd, 5),
+            "mass_conservation_error_pct": round(res.mass_conservation_error_pct, 5),
+            "exit_mach_centerline": round(res.exit_mach_centerline, 4),
+            "exit_mach_wall": round(res.exit_mach_wall, 4),
+            "sonic_line_offset_mm": round(res.sonic_line_offset_mm, 3),
+            "separation_detected": res.separation_detected,
+            "separation_x_m": (
+                round(res.separation_x_m, 4) if res.separation_x_m is not None else None
+            ),
+            "mach_disc_detected": res.mach_disc_detected,
+            "mach_disc_x_m": round(res.mach_disc_x_m, 4) if res.mach_disc_x_m is not None else None,
+            "shock_diamond_wavelength_m": (
+                round(res.shock_diamond_wavelength_m, 4)
+                if res.shock_diamond_wavelength_m is not None
+                else None
+            ),
+        }
     raise ValueError(f"Unknown MCP tool: {name}")
 
 

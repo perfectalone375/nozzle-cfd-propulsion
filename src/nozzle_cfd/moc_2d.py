@@ -1,4 +1,10 @@
-"""2D Method of Characteristics (MOC) core net & supersonic exhaust plume shock-diamond solver."""
+"""2D Axisymmetric Supersonic Nozzle Flow & Plume Shock Diamond Reconstruction.
+
+Combines analytical Method-of-Characteristics (MOC) throat-expansion wave rays inside the bell
+with the coupled **2D Axisymmetric Curvilinear Finite-Volume Euler / Navier-Stokes Solver**
+(`navier_stokes_2d.py`), resolving genuine barrel shocks, Mach discs, triple points,
+shear slip-lines, and optical Numerical Schlieren gradients instead of analytical waveforms.
+"""
 
 from __future__ import annotations
 
@@ -9,11 +15,12 @@ import numpy as np
 
 from nozzle_cfd.cfd_solver import NozzleCFDResult
 from nozzle_cfd.geometry import NozzleGeometry
+from nozzle_cfd.navier_stokes_2d import NavierStokes2DResult, solve_axisymmetric_navier_stokes_2d
 
 
 @dataclass(frozen=True)
 class Plume2DResult:
-    """2D axisymmetric (x, r) flowfield spanning internal nozzle and supersonic exhaust plume."""
+    """Two-dimensional `(x, r)` nozzle interior + exhaust plume Mach/P/T/Schlieren field."""
 
     x_m: np.ndarray
     r_m: np.ndarray
@@ -28,6 +35,13 @@ class Plume2DResult:
     moc_wall_x_m: np.ndarray
     moc_wall_r_m: np.ndarray
     moc_rays: list[tuple[list[float], list[float]]]
+    schlieren_2d: np.ndarray | None = None
+    solver_backend: str = "cpp20_openmp_dll"
+    solve_ms: float = 0.0
+    mach_disc_detected: bool = False
+    separation_detected: bool = False
+    discharge_coefficient_cd: float = 1.0
+    ns2d_result: NavierStokes2DResult | None = None
 
 
 def prandtl_meyer_deg(mach: float, gamma: float) -> float:
@@ -88,177 +102,119 @@ def _compute_moc_characteristic_net(
 def simulate_2d_nozzle_and_plume(
     geometry: NozzleGeometry,
     cfd_1d: NozzleCFDResult,
-    plume_length_diameters: float = 5.5,
-    nx_plume: int = 160,
+    plume_length_diameters: float = 3.8,
+    nx_plume: int = 128,
     nr_half: int = 75,
+    viscous_mode: str = "euler",
 ) -> Plume2DResult:
-    """Reconstruct a full 2D axisymmetric (x, r) field with plume shock diamonds."""
+    """Solve coupled 2D Axisymmetric nozzle + exhaust plume field for ParaView & visualization."""
     gamma = cfd_1d.gamma
-    gm1 = gamma - 1.0
     pc_kpa = cfd_1d.chamber_pressure_mpa * 1.0e3
-    pa_kpa = max(0.05, cfd_1d.ambient_pressure_kpa)
-
-    m_exit = float(cfd_1d.mach[-1])
-    p_exit_kpa = float(cfd_1d.pressure_kpa[-1])
-    t_exit_k = float(cfd_1d.temperature_k[-1])
-    re = float(geometry.radius_m[-1])
-    exit_diam = 2.0 * re
-
-    # Fully expanded jet Mach number M_j for Prandtl-Meyer plume wave amplitude
-    pr_ca = max(1.02, pc_kpa / pa_kpa)
-    m_jet = math.sqrt((2.0 / gm1) * ((pr_ca ** (gm1 / gamma)) - 1.0)) if m_exit >= 0.9 else m_exit
-    m_jet = max(0.2, min(8.5, m_jet))
-
-    # Pack's shock-cell wavelength equation for axisymmetric supersonic jets
-    m_eff = max(1.06, 0.5 * (m_exit + m_jet)) if m_exit >= 0.95 else 1.06
-    mismatch = abs((p_exit_kpa / pa_kpa) - 1.0)
-    wavelength_m = (
-        (math.pi * exit_diam / 2.4048)
-        * math.sqrt((m_eff**2) - 1.0)
-        * (1.0 + 0.12 * min(2.0, mismatch))
+    pa_kpa = cfd_1d.ambient_pressure_kpa
+    re = (
+        geometry.exit_radius_m
+        if hasattr(geometry, "exit_radius_m")
+        else float(geometry.radius_m[-1])
     )
-    wavelength_m = max(0.35 * exit_diam, wavelength_m)
 
-    # Extend domain downstream into exhaust plume
-    x_internal = geometry.x_m
-    plume_len = max(2.0 * exit_diam, plume_length_diameters * exit_diam)
-    x_plume = np.linspace(
-        geometry.total_length_m, geometry.total_length_m + plume_len, nx_plume + 1
-    )[1:]
-    x_all = np.concatenate([x_internal, x_plume])
+    # Analytical fully-expanded plume reference Mach and shock-diamond wavelength estimate
+    pr_ratio = max(1.01, pc_kpa / max(1e-3, pa_kpa))
+    m_j = math.sqrt(max(0.0, (2.0 / (gamma - 1.0)) * ((pr_ratio ** ((gamma - 1.0) / gamma)) - 1.0)))
+    d_exit = 2.0 * re
+    lam_pack = 1.22 * d_exit * math.sqrt(max(0.1, m_j**2 - 1.0))
 
-    # Determine plume radial jet envelope r_jet(x)
-    # Overexpanded (Pe < Pa) pinches slightly in first half-cell; underexpanded (Pe > Pa) flares out
-    pressure_ratio_ea = p_exit_kpa / pa_kpa
-    if m_exit >= 0.95 and pa_kpa > 0.1:
-        spread_growth = 0.045 * (x_plume - geometry.total_length_m)
-        flare = min(
-            0.55, max(-0.22, 0.24 * math.tanh(0.85 * math.log(max(0.1, pressure_ratio_ea))))
-        )
-        phase_plume = 2.0 * math.pi * (x_plume - geometry.total_length_m) / wavelength_m
-        r_plume_env = re * (1.0 + flare * 0.5 * (1.0 - np.cos(phase_plume))) + spread_growth
-    else:
-        r_plume_env = re + 0.06 * (x_plume - geometry.total_length_m)
+    nx1 = 72
+    nr1 = 26
+    nx2 = min(140, max(64, int(nx_plume)))
+    plume_len_radii = 2.0 * plume_length_diameters
 
-    r_env_all = np.concatenate([geometry.radius_m, r_plume_env])
-    r_max = float(max(np.max(r_env_all), re * 1.35))
-    r_full = np.linspace(-r_max, r_max, 2 * nr_half - 1)
+    ns2d = solve_axisymmetric_navier_stokes_2d(
+        geom=geometry,
+        propellant_key=cfd_1d.propellant,
+        chamber_pressure_mpa=cfd_1d.chamber_pressure_mpa,
+        ambient_pressure_kpa=pa_kpa,
+        viscous_mode=viscous_mode,
+        limiter="van_leer",
+        nx1=nx1,
+        nr1=nr1,
+        include_plume=True,
+        nx2=nx2,
+        plume_length_radii=plume_len_radii,
+        max_iters=2000,
+    )
 
-    nx_total = len(x_all)
-    nr_total = len(r_full)
-    mach_2d = np.full((nr_total, nx_total), np.nan, dtype=float)
-    pres_2d = np.full((nr_total, nx_total), np.nan, dtype=float)
-    temp_2d = np.full((nr_total, nx_total), np.nan, dtype=float)
+    assert ns2d.x2_c is not None and ns2d.r2_c is not None and ns2d.mach_2 is not None
+    x1_ax = ns2d.x1_c[:, 0]
+    x2_ax = ns2d.x2_c[:, 0]
+    x_m = np.concatenate([x1_ax, x2_ax])
 
-    n_int = len(x_internal)
-    throat_idx = int(np.argmin(geometry.area_ratio))
+    r_max = float(ns2d.r2_v[-1, -1]) if ns2d.r2_v is not None else 2.2 * re
+    nr_h = max(35, int(nr_half))
+    r_m = np.linspace(-r_max, r_max, 2 * nr_h - 1)
+    abs_r = np.abs(r_m)
 
-    # Populate internal nozzle core (incorporating radial Prandtl-Meyer throat acceleration)
-    for ix in range(n_int):
-        r_w = geometry.radius_m[ix]
-        m_1d = float(cfd_1d.mach[ix])
-        p_1d = float(cfd_1d.pressure_kpa[ix])
-        t_1d = float(cfd_1d.temperature_k[ix])
+    nx_tot = len(x_m)
+    nr_tot = len(r_m)
+    mach_2d = np.full((nr_tot, nx_tot), np.nan, dtype=np.float64)
+    pres_2d = np.full((nr_tot, nx_tot), pa_kpa, dtype=np.float64)
+    temp_2d = np.full((nr_tot, nx_tot), 300.0, dtype=np.float64)
+    sch_2d = np.zeros((nr_tot, nx_tot), dtype=np.float64)
+    upper_r = np.empty(nx_tot, dtype=np.float64)
 
-        inside = np.abs(r_full) <= r_w + 1e-9
-        r_norm = np.abs(r_full[inside]) / max(r_w, 1e-6)
+    # Interpolate Block 1 (internal nozzle) cleanly across |r| <= R_wall(x)
+    r_wall_1 = np.interp(x1_ax, geometry.x_m, geometry.radius_m)
+    for i in range(nx1):
+        rw = float(r_wall_1[i])
+        upper_r[i] = rw
+        inside = abs_r <= (rw + 1e-6)
+        r_src = ns2d.r1_c[i, :]
+        mach_2d[inside, i] = np.interp(abs_r[inside], r_src, ns2d.mach_1[i, :])
+        pres_2d[inside, i] = np.interp(abs_r[inside], r_src, ns2d.p_kpa_1[i, :])
+        temp_2d[inside, i] = np.interp(abs_r[inside], r_src, ns2d.T_k_1[i, :])
+        sch_2d[inside, i] = np.interp(abs_r[inside], r_src, ns2d.schlieren_1[i, :])
 
-        # Near-throat & diverging radial gradient: wall leads centerline in transonic turn
-        if ix >= throat_idx - 4 and ix <= min(
-            n_int - 1, throat_idx + int(0.45 * (n_int - throat_idx))
-        ):
-            radial_boost = 0.08 * math.sin(
-                math.pi
-                * max(
-                    0.0,
-                    min(1.0, (ix - (throat_idx - 4)) / max(1, int(0.45 * (n_int - throat_idx)))),
-                )
-            )
-            m_prof = m_1d * (1.0 - 0.5 * radial_boost + radial_boost * (r_norm**2))
-        else:
-            m_prof = np.full_like(r_norm, m_1d)
+    # Interpolate Block 2 (external plume) across full radial box [0, r_max]
+    r_src2 = ns2d.r2_c[0, :]
+    for k in range(nx2):
+        idx = nx1 + k
+        mach_col = np.interp(abs_r, r_src2, ns2d.mach_2[k, :])
+        mach_2d[:, idx] = mach_col
+        pres_2d[:, idx] = np.interp(abs_r, r_src2, ns2d.p_kpa_2[k, :])
+        temp_2d[:, idx] = np.interp(abs_r, r_src2, ns2d.T_k_2[k, :])
+        sch_2d[:, idx] = np.interp(abs_r, r_src2, ns2d.schlieren_2[k, :])
+        # Physical shear-layer boundary tracked by core jet Mach >= 0.45 envelope
+        half_pos = r_src2[ns2d.mach_2[k, :] >= 0.45]
+        upper_r[idx] = float(half_pos[-1]) if len(half_pos) > 0 else re
 
-        # Wall boundary layer slow-down near extreme rim (outermost 4% radius)
-        bl_factor = 1.0 - 0.08 * np.maximum(0.0, (r_norm - 0.92) / 0.08) ** 2
-        m_prof = np.maximum(0.05, m_prof * bl_factor)
-
-        if not cfd_1d.shock_detected:
-            t_prof = cfd_1d.tc_k / (1.0 + 0.5 * gm1 * (m_prof**2))
-            p_prof = pc_kpa * ((1.0 + 0.5 * gm1 * (m_prof**2)) ** (-gamma / gm1))
-        else:
-            t_prof = np.full_like(m_prof, t_1d)
-            p_prof = np.full_like(m_prof, p_1d)
-
-        mach_2d[inside, ix] = m_prof
-        pres_2d[inside, ix] = p_prof
-        temp_2d[inside, ix] = t_prof
-
-    # Populate supersonic plume with genuine criss-crossing oblique shock diamond characteristics
-    amplitude = min(0.42, 0.32 * abs(math.tanh(math.log(max(0.15, pressure_ratio_ea)))))
-    # Ensure visible shock diamonds even near design pressure from bell wall compression
-    amplitude = max(0.12, amplitude) if m_exit >= 0.98 else 0.02
-    sign_mismatch = 1.0 if pressure_ratio_ea >= 1.0 else -1.0
-
-    for j in range(len(x_plume)):
-        ix = n_int + j
-        dx_p = float(x_plume[j] - geometry.total_length_m)
-        r_jet = float(r_plume_env[j])
-        decay = math.exp(-0.18 * dx_p / max(exit_diam, 1e-4))
-        phase_x = 2.0 * math.pi * dx_p / wavelength_m
-
-        # Ambient region outside r_jet stays at atmospheric pressure
-        inside = np.abs(r_full) <= r_jet
-        r_abs = np.abs(r_full[inside])
-        r_norm = r_abs / max(r_jet, 1e-6)
-
-        if m_exit >= 0.95:
-            # Crossing C+ / C- characteristic oblique shock waves with harmonic steepening
-            arg_plus = phase_x + math.pi * r_norm
-            arg_minus = phase_x - math.pi * r_norm
-            wave_p = 0.65 * np.cos(arg_plus) + 0.25 * np.cos(2.0 * arg_plus)
-            wave_m = 0.65 * np.cos(arg_minus) + 0.25 * np.cos(2.0 * arg_minus)
-            diamond_mod = sign_mismatch * amplitude * decay * 0.55 * (wave_p + wave_m)
-            # Centerline focusing peak at focal shock nodes
-            core_focus = 1.0 + 0.22 * (1.0 - r_norm**2) * decay
-            shear_layer = 1.0 - 0.50 * (r_norm ** max(3.5, 8.0 - 2.0 * dx_p / max(exit_diam, 1e-4)))
-
-            m_slice = np.maximum(0.35, m_exit * (1.0 + diamond_mod * core_focus) * shear_layer)
-            p_slice = np.maximum(
-                0.35 * pa_kpa,
-                p_exit_kpa * (1.0 - 0.85 * diamond_mod * core_focus) * (1.0 - 0.15 * r_norm**4)
-                + pa_kpa * (0.15 * r_norm**4),
-            )
-            t_slice = t_exit_k * np.maximum(0.35, (1.0 - 0.28 * diamond_mod))
-        else:
-            shear = 1.0 - 0.5 * (r_norm**3)
-            m_slice = m_exit * decay * shear
-            p_slice = np.full_like(r_abs, pa_kpa)
-            t_slice = 300.0 + (t_exit_k - 300.0) * decay * shear
-
-        mach_2d[inside, ix] = m_slice
-        pres_2d[inside, ix] = p_slice
-        temp_2d[inside, ix] = t_slice
-
-        # Ambient co-flow outside plume shear layer (for clean contour & VTK rendering)
-        outside = ~inside
-        mach_2d[outside, ix] = 0.0
-        pres_2d[outside, ix] = pa_kpa
-        temp_2d[outside, ix] = 288.15
-
-    moc_x, moc_r, moc_rays = _compute_moc_characteristic_net(geometry, gamma, m_exit)
+    moc_wx, moc_wr, moc_rays = _compute_moc_characteristic_net(
+        geometry, gamma, float(np.nanmean(ns2d.mach_1[-1, :]))
+    )
+    lam_final = (
+        float(ns2d.shock_diamond_wavelength_m)
+        if ns2d.shock_diamond_wavelength_m is not None
+        else lam_pack
+    )
+    nu_exit = prandtl_meyer_deg(float(cfd_1d.mach[-1]), gamma)
 
     return Plume2DResult(
-        x_m=x_all,
-        r_m=r_full,
+        x_m=x_m,
+        r_m=r_m,
         mach_2d=mach_2d,
         pressure_kpa_2d=pres_2d,
         temperature_k_2d=temp_2d,
-        upper_boundary_r_m=r_env_all,
-        lower_boundary_r_m=-r_env_all,
-        shock_diamond_wavelength_m=round(wavelength_m, 4),
-        fully_expanded_mach=round(m_jet, 4),
-        prandtl_meyer_exit_deg=round(prandtl_meyer_deg(m_exit, gamma), 2),
-        moc_wall_x_m=moc_x,
-        moc_wall_r_m=moc_r,
+        upper_boundary_r_m=upper_r,
+        lower_boundary_r_m=-upper_r,
+        shock_diamond_wavelength_m=round(lam_final, 4),
+        fully_expanded_mach=round(m_j, 4),
+        prandtl_meyer_exit_deg=round(nu_exit, 2),
+        moc_wall_x_m=moc_wx,
+        moc_wall_r_m=moc_wr,
         moc_rays=moc_rays,
+        schlieren_2d=sch_2d,
+        solver_backend=ns2d.solver_backend,
+        solve_ms=ns2d.solve_ms,
+        mach_disc_detected=ns2d.mach_disc_detected,
+        separation_detected=ns2d.separation_detected,
+        discharge_coefficient_cd=ns2d.discharge_coefficient_cd,
+        ns2d_result=ns2d,
     )

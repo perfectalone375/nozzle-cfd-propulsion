@@ -20,7 +20,7 @@ COPY tests ./tests
 
 RUN pip install --no-cache-dir -e ".[dev]" \
     && make -C cpp all \
-    && cp cpp/maccormack_cfd cpp/hllc_fvm_cfd /usr/local/bin/
+    && cp cpp/maccormack_cfd cpp/hllc_fvm_cfd cpp/axisymmetric_ns2d /usr/local/bin/
 
 ENTRYPOINT ["nozzle-cfd"]
 CMD ["--propellant", "METHALOX", "--chamber-pressure-mpa", "10.0", "--ambient-pressure-kpa", "101.325"]

@@ -11,6 +11,11 @@ from nozzle_cfd.cfd_solver import solve_quasi1d_maccormack
 from nozzle_cfd.cooling import analyze_bartz_cooling
 from nozzle_cfd.geometry import build_rao_bell_nozzle
 from nozzle_cfd.moc_2d import simulate_2d_nozzle_and_plume
+from nozzle_cfd.navier_stokes_2d import (
+    build_conical_nozzle_geometry,
+    export_axisymmetric_vts,
+    solve_axisymmetric_navier_stokes_2d,
+)
 from nozzle_cfd.propellants import (
     PROPELLANTS,
     evaluate_propellant_performance,
@@ -23,6 +28,7 @@ from nozzle_cfd.riemann_fvm import (
 )
 from nozzle_cfd.visualize import (
     export_plume_vtk,
+    generate_2d_ns_schlieren_plot,
     generate_2d_plume_plot,
     generate_fvm_riemann_plot,
     generate_propellant_trade_plot,
@@ -90,9 +96,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="MUSCL TVD slope limiter for Finite-Volume Riemann solvers (default: van_leer).",
     )
     parser.add_argument(
+        "--viscous-mode",
+        default="euler",
+        choices=["euler", "laminar", "turbulent"],
+        help="2D Axisymmetric Navier-Stokes viscosity & turbulence closure (default: euler).",
+    )
+    parser.add_argument(
         "--export-all",
         action="store_true",
-        help="Generate VTK mesh, 3 Matplotlib figures, and JSON report in --output-dir.",
+        help="Generate VTK/VTS meshes, Matplotlib figures, and JSON report in --output-dir.",
     )
     parser.add_argument(
         "--output-dir",
@@ -144,9 +156,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         cfd = cfd_mac
 
     cooling = analyze_bartz_cooling(geom, cfd_mac, material_key=args.material)
-    plume = simulate_2d_nozzle_and_plume(geom, cfd_mac)
+    plume = simulate_2d_nozzle_and_plume(geom, cfd_mac, viscous_mode=args.viscous_mode)
 
     artifacts: list[str] = []
+    ns2d_jpl = None
+    ns2d_sep = None
     if args.export_all:
         out_dir = Path(args.output_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -191,7 +205,50 @@ def main(argv: Sequence[str] | None = None) -> int:
             throat_radius_m=args.throat_radius_m,
         )
 
+        # Step 2 2D Axisymmetric Navier-Stokes validations (JPL 45-15 & overexpanded separation)
+        jpl_geom = build_conical_nozzle_geometry(
+            throat_radius_m=0.05,
+            contraction_ratio=3.0,
+            expansion_ratio=4.0,
+            conv_half_angle_deg=45.0,
+            div_half_angle_deg=15.0,
+            throat_rc_ratio=0.625,
+            n_points=121,
+        )
+        ns2d_jpl = solve_axisymmetric_navier_stokes_2d(
+            jpl_geom,
+            propellant_key="COLD_GAS_N2",
+            chamber_pressure_mpa=1.0,
+            ambient_pressure_kpa=2.0,
+            viscous_mode="euler",
+            limiter=args.limiter,
+            nx1=84,
+            nr1=30,
+            include_plume=False,
+            max_iters=2400,
+        )
+        ns2d_sep = solve_axisymmetric_navier_stokes_2d(
+            geom,
+            propellant_key=args.propellant,
+            chamber_pressure_mpa=1.2,
+            ambient_pressure_kpa=320.0,
+            viscous_mode="turbulent",
+            limiter=args.limiter,
+            nx1=84,
+            nr1=28,
+            include_plume=False,
+            max_iters=2400,
+        )
+
         vtk_p = export_plume_vtk(plume, out_dir / "nozzle_plume_field.vtk")
+        vts_paths: list[Path] = []
+        if plume.ns2d_result is not None:
+            vts_int, vts_plume = export_axisymmetric_vts(
+                plume.ns2d_result, out_dir, stem="nozzle_ns2d"
+            )
+            vts_paths.append(vts_int)
+            if vts_plume is not None:
+                vts_paths.append(vts_plume)
         shock_png = generate_shock_cfd_plot(
             geom_shock, cfd_mac, cfd_shock, cooling, out_dir / "nozzle_shock_cfd_analysis.png"
         )
@@ -202,6 +259,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             trade, out_dir / "multi_propellant_trade_study.png"
         )
         plume_png = generate_2d_plume_plot(geom, plume, out_dir / "plume_mach_diamonds_2d.png")
+        schlieren_png = generate_2d_ns_schlieren_plot(
+            plume.ns2d_result, ns2d_jpl, ns2d_sep, out_dir / "ns2d_schlieren_and_jpl_validation.png"
+        )
 
         report = {
             "performance": perf.to_dict(),
@@ -261,15 +321,69 @@ def main(argv: Sequence[str] | None = None) -> int:
             },
             "plume_2d": {
                 "grid_shape": list(plume.mach_2d.shape),
+                "solver_backend": plume.solver_backend,
+                "solve_ms": round(plume.solve_ms, 2),
+                "discharge_coefficient_cd": plume.discharge_coefficient_cd,
+                "mach_disc_detected": plume.mach_disc_detected,
+                "separation_detected": plume.separation_detected,
                 "shock_diamond_wavelength_m": plume.shock_diamond_wavelength_m,
                 "fully_expanded_mach": plume.fully_expanded_mach,
                 "prandtl_meyer_exit_deg": plume.prandtl_meyer_exit_deg,
+            },
+            "2d_navier_stokes_benchmark": {
+                "coupled_plume": {
+                    "backend": plume.solver_backend,
+                    "n_threads": plume.ns2d_result.n_threads if plume.ns2d_result else 1,
+                    "solve_ms": round(plume.solve_ms, 2),
+                    "mass_conservation_error_pct": (
+                        round(plume.ns2d_result.mass_conservation_error_pct, 5)
+                        if plume.ns2d_result
+                        else None
+                    ),
+                    "discharge_coefficient_cd": plume.discharge_coefficient_cd,
+                    "sonic_line_offset_mm": (
+                        round(plume.ns2d_result.sonic_line_offset_mm, 3)
+                        if plume.ns2d_result
+                        else None
+                    ),
+                },
+                "jpl_45_15_validation": {
+                    "backend": ns2d_jpl.solver_backend,
+                    "converged": ns2d_jpl.converged,
+                    "solve_ms": round(ns2d_jpl.solve_ms, 2),
+                    "discharge_coefficient_cd": round(ns2d_jpl.discharge_coefficient_cd, 5),
+                    "sonic_line_offset_mm": round(ns2d_jpl.sonic_line_offset_mm, 3),
+                    "mass_conservation_error_pct": round(ns2d_jpl.mass_conservation_error_pct, 5),
+                },
+                "viscous_turbulent_separation": {
+                    "backend": ns2d_sep.solver_backend,
+                    "viscous_mode": ns2d_sep.viscous_mode,
+                    "separation_detected": ns2d_sep.separation_detected,
+                    "separation_x_m": (
+                        round(ns2d_sep.separation_x_m, 4)
+                        if ns2d_sep.separation_x_m is not None
+                        else None
+                    ),
+                    "min_wall_velocity_m_s": round(float(ns2d_sep.u_1[:, -1].min()), 2),
+                },
             },
             "trade_study": [item.to_dict() for item in trade],
         }
         report_path = out_dir / "nozzle_cfd_benchmark_report.json"
         report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
-        artifacts = [str(p) for p in (vtk_p, shock_png, fvm_png, trade_png, plume_png, report_path)]
+        artifacts = [
+            str(p)
+            for p in (
+                vtk_p,
+                *vts_paths,
+                shock_png,
+                fvm_png,
+                trade_png,
+                plume_png,
+                schlieren_png,
+                report_path,
+            )
+        ]
 
     summary = {
         "performance": perf.to_dict(),
@@ -289,8 +403,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             "wall_survives": cooling.wall_survives,
         },
         "plume_summary": {
+            "solver_backend": plume.solver_backend,
+            "discharge_coefficient_cd": plume.discharge_coefficient_cd,
             "shock_diamond_wavelength_m": plume.shock_diamond_wavelength_m,
             "fully_expanded_mach": plume.fully_expanded_mach,
+            "mach_disc_detected": plume.mach_disc_detected,
+            "separation_detected": plume.separation_detected,
         },
         "artifacts": artifacts,
     }
@@ -306,6 +424,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(
             f"[MacCormack CFD] regime={cfd.flow_regime} | iters={cfd.iterations} | "
             f"M_exit={cfd.mach[-1]:.3f} | L2_err={cfd.mach_l2_error_pct:.3f}%"
+        )
+        print(
+            f"[2D Axisymmetric NS/Plume] backend={plume.solver_backend} | "
+            f"Cd={plume.discharge_coefficient_cd:.4f} | "
+            f"L_cell={plume.shock_diamond_wavelength_m:.3f} m | time={plume.solve_ms:.0f} ms"
         )
         print(
             f"[Bartz Cooling] {cooling.wall_material}: "
