@@ -1,0 +1,33 @@
+# Byte-compiled / Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Compiled C++ binaries & objects
+*.o
+*.obj
+*.exe
+*.out
+cpp/build/
+cpp/maccormack_cfd
+
+# MATLAB/Octave temp files
+octave-workspace
+*.asv
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
