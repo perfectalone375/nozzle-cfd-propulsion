@@ -97,3 +97,11 @@ nozzle-cfd-mcp
 1. Run `nozzle-cfd --export-all` (or open pre-generated [`deliverables/nozzle_ns2d_interior.vts`](deliverables/nozzle_ns2d_interior.vts) & [`deliverables/nozzle_ns2d_plume.vts`](deliverables/nozzle_ns2d_plume.vts)).
 2. Open **ParaView** -> **File > Open** -> select both `.vts` StructuredGrid blocks (or [`deliverables/nozzle_plume_field.vtk`](deliverables/nozzle_plume_field.vtk)) -> Click **Apply**.
 3. Color by **`Mach`**, **`Numerical_Schlieren`**, or **`Pressure_kPa`** to inspect the curved sonic line, internal expansion waves, and exhaust Mach diamonds interactively.
+
+---
+
+## CI Reliability & Incident Dossier
+
+Full root-cause analysis and engineering hardening logs covering CI checks, OpenMP performance profiling, and step-by-step CFD fixes are archived in:
+- **PDF Engineering Report:** [`deliverables/CI_AND_SOLVER_INCIDENT_REPORT.pdf`](deliverables/CI_AND_SOLVER_INCIDENT_REPORT.pdf)
+- **Markdown Engineering Dossier:** [`deliverables/CI_AND_SOLVER_INCIDENT_REPORT.md`](deliverables/CI_AND_SOLVER_INCIDENT_REPORT.md)
