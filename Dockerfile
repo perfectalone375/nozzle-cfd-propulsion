@@ -6,7 +6,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Install C++17 compiler for native high-speed MacCormack CFD kernel
+# Install C++20 toolchain for native MacCormack, HLLC+ FVM, and shared library kernels
 RUN apt-get update && apt-get install -y --no-install-recommends \
     g++ \
     make \
@@ -19,7 +19,8 @@ COPY matlab ./matlab
 COPY tests ./tests
 
 RUN pip install --no-cache-dir -e ".[dev]" \
-    && g++ -O3 -std=c++17 -Wall -Wextra -o /usr/local/bin/maccormack_cfd cpp/maccormack_cfd.cpp
+    && make -C cpp all \
+    && cp cpp/maccormack_cfd cpp/hllc_fvm_cfd /usr/local/bin/
 
 ENTRYPOINT ["nozzle-cfd"]
 CMD ["--propellant", "METHALOX", "--chamber-pressure-mpa", "10.0", "--ambient-pressure-kpa", "101.325"]

@@ -102,6 +102,7 @@ def test_cli_export_all_and_mcp_jsonrpc(tmp_path: Path, capsys: object) -> None:
     assert rc == 0
     assert (tmp_path / "nozzle_plume_field.vtk").exists()
     assert (tmp_path / "nozzle_shock_cfd_analysis.png").exists()
+    assert (tmp_path / "fvm_riemann_validation.png").exists()
     assert (tmp_path / "multi_propellant_trade_study.png").exists()
     assert (tmp_path / "plume_mach_diamonds_2d.png").exists()
     assert (tmp_path / "nozzle_cfd_benchmark_report.json").exists()
@@ -112,7 +113,7 @@ def test_cli_export_all_and_mcp_jsonrpc(tmp_path: Path, capsys: object) -> None:
 
     tools_resp = handle_jsonrpc_request({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
     assert tools_resp is not None
-    assert len(tools_resp["result"]["tools"]) == 4
+    assert len(tools_resp["result"]["tools"]) == 6
 
     call_resp = handle_jsonrpc_request(
         {

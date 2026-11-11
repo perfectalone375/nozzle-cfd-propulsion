@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nozzle-cfd-propulsion"
-version = "0.1.0"
+version = "0.2.0"
 description = "Multi-propellant rocket propulsion & supersonic nozzle CFD digital twin (MacCormack shock-capturing CFD, 2D Method of Characteristics, Bartz thermal cooling) across Python, MATLAB/Octave, and C++17."
 readme = "README.md"
 license = {text = "MIT"}
@@ -60,4 +60,5 @@ select = ["E", "F", "I", "UP", "B"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["src"]
 addopts = "-v"

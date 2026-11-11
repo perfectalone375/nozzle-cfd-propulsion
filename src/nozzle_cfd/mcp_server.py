@@ -16,6 +16,11 @@ from nozzle_cfd.propellants import (
     evaluate_propellant_performance,
     run_propellant_trade_study,
 )
+from nozzle_cfd.riemann_fvm import (
+    run_grid_convergence_study,
+    solve_quasi1d_fvm,
+    solve_sod_shock_tube,
+)
 
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_INFO = {"name": "nozzle-cfd-mcp", "version": __version__}
@@ -73,6 +78,49 @@ MCP_TOOLS: list[dict[str, Any]] = [
                 "chamber_pressure_mpa": {"type": "number", "default": 10.0},
                 "ambient_pressure_kpa": {"type": "number", "default": 101.325},
                 "expansion_ratio": {"type": "number", "default": 12.0},
+            },
+        },
+    },
+    {
+        "name": "run_fvm_riemann_benchmark",
+        "description": (
+            "Run Finite-Volume HLLC+/AUSM+ MUSCL-TVD CFD benchmark on Toro's Sod Shock Tube "
+            "or an overexpanded standing-shock rocket nozzle (auto-uses C++20 DLL if present)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "benchmark": {"type": "string", "enum": ["sod", "nozzle_shock"], "default": "sod"},
+                "flux_scheme": {
+                    "type": "string",
+                    "enum": ["hllc", "ausm_plus", "rusanov"],
+                    "default": "hllc",
+                },
+                "limiter": {
+                    "type": "string",
+                    "enum": ["first_order", "minmod", "van_leer", "superbee", "mc"],
+                    "default": "van_leer",
+                },
+                "nx": {"type": "integer", "default": 200},
+            },
+        },
+    },
+    {
+        "name": "run_grid_convergence_study",
+        "description": (
+            "Perform formal 3-grid ASME V&V 20 / Roache Grid Convergence Index (GCI) verification."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "propellant": {"type": "string", "default": "METHALOX"},
+                "expansion_ratio": {"type": "number", "default": 12.0},
+                "flux_scheme": {"type": "string", "enum": ["hllc", "ausm_plus"], "default": "hllc"},
+                "limiter": {
+                    "type": "string",
+                    "enum": ["minmod", "van_leer"],
+                    "default": "van_leer",
+                },
             },
         },
     },
@@ -144,6 +192,56 @@ def _call_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
             "fully_expanded_mach": plume.fully_expanded_mach,
             "prandtl_meyer_exit_deg": plume.prandtl_meyer_exit_deg,
         }
+    if name == "run_fvm_riemann_benchmark":
+        bench = str(args.get("benchmark", "sod")).lower()
+        flux = str(args.get("flux_scheme", "hllc")).lower()
+        lim = str(args.get("limiter", "van_leer")).lower()
+        nx = int(args.get("nx", 200))
+        if bench == "sod":
+            res = solve_sod_shock_tube(nx=nx, flux_scheme=flux, limiter=lim)
+            return {
+                "benchmark": "sod",
+                "flux_scheme": res.flux_scheme,
+                "limiter": res.limiter,
+                "nx": res.nx,
+                "rho_l1_error": res.rho_l1_error,
+                "rho_l2_error": res.rho_l2_error,
+                "p_l2_error": res.p_l2_error,
+                "solve_ms": res.solve_ms,
+            }
+        geom = build_rao_bell_nozzle(
+            throat_radius_m=0.10,
+            contraction_ratio=3.0,
+            expansion_ratio=8.0,
+            n_points=min(max(nx, 81), 321),
+        )
+        fvm = solve_quasi1d_fvm(geom, "METHALOX", 1.0, 380.0, flux_scheme=flux, limiter=lim)
+        return {
+            "benchmark": "nozzle_shock",
+            "solver_backend": fvm.solver_backend,
+            "flux_scheme": fvm.flux_scheme,
+            "limiter": fvm.limiter,
+            "converged": fvm.converged,
+            "iterations": fvm.iterations,
+            "shock_detected": fvm.shock_detected,
+            "shock_upstream_mach": fvm.shock_upstream_mach,
+            "shock_downstream_mach": fvm.shock_downstream_mach,
+            "mach_l2_error_pct": fvm.mach_l2_error_pct,
+            "solve_ms": fvm.solve_ms,
+        }
+    if name == "run_grid_convergence_study":
+        prop = str(args.get("propellant", "METHALOX"))
+        eps = float(args.get("expansion_ratio", 12.0))
+        flux = str(args.get("flux_scheme", "hllc"))
+        lim = str(args.get("limiter", "van_leer"))
+        gci = run_grid_convergence_study(
+            propellant_key=prop,
+            expansion_ratio=eps,
+            flux_scheme=flux,
+            limiter=lim,
+            grid_sizes=(81, 161, 321),
+        )
+        return gci.to_dict()
     raise ValueError(f"Unknown MCP tool: {name}")
 
 

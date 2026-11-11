@@ -16,9 +16,15 @@ from nozzle_cfd.propellants import (
     evaluate_propellant_performance,
     run_propellant_trade_study,
 )
+from nozzle_cfd.riemann_fvm import (
+    run_grid_convergence_study,
+    solve_quasi1d_fvm,
+    solve_sod_shock_tube,
+)
 from nozzle_cfd.visualize import (
     export_plume_vtk,
     generate_2d_plume_plot,
+    generate_fvm_riemann_plot,
     generate_propellant_trade_plot,
     generate_shock_cfd_plot,
 )
@@ -72,6 +78,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Axial CFD grid points (default: 141).",
     )
     parser.add_argument(
+        "--solver",
+        default="fvm_hllc",
+        choices=["fvm_hllc", "fvm_ausm", "maccormack"],
+        help="Primary 1D nozzle CFD scheme (default: fvm_hllc).",
+    )
+    parser.add_argument(
+        "--limiter",
+        default="van_leer",
+        choices=["first_order", "minmod", "van_leer", "superbee", "mc"],
+        help="MUSCL TVD slope limiter for Finite-Volume Riemann solvers (default: van_leer).",
+    )
+    parser.add_argument(
         "--export-all",
         action="store_true",
         help="Generate VTK mesh, 3 Matplotlib figures, and JSON report in --output-dir.",
@@ -106,14 +124,27 @@ def main(argv: Sequence[str] | None = None) -> int:
         expansion_ratio=args.expansion_ratio,
         n_points=args.nx,
     )
-    cfd = solve_quasi1d_maccormack(
+    cfd_mac = solve_quasi1d_maccormack(
         geom,
         propellant_key=args.propellant,
         chamber_pressure_mpa=args.chamber_pressure_mpa,
         ambient_pressure_kpa=args.ambient_pressure_kpa,
     )
-    cooling = analyze_bartz_cooling(geom, cfd, material_key=args.material)
-    plume = simulate_2d_nozzle_and_plume(geom, cfd)
+    if args.solver in ("fvm_hllc", "fvm_ausm"):
+        scheme = "ausm_plus" if args.solver == "fvm_ausm" else "hllc"
+        cfd = solve_quasi1d_fvm(
+            geom,
+            propellant_key=args.propellant,
+            chamber_pressure_mpa=args.chamber_pressure_mpa,
+            ambient_pressure_kpa=args.ambient_pressure_kpa,
+            flux_scheme=scheme,
+            limiter=args.limiter,
+        )
+    else:
+        cfd = cfd_mac
+
+    cooling = analyze_bartz_cooling(geom, cfd_mac, material_key=args.material)
+    plume = simulate_2d_nozzle_and_plume(geom, cfd_mac)
 
     artifacts: list[str] = []
     if args.export_all:
@@ -133,6 +164,26 @@ def main(argv: Sequence[str] | None = None) -> int:
             chamber_pressure_mpa=1.0,
             ambient_pressure_kpa=380.0,
         )
+        fvm_shock = solve_quasi1d_fvm(
+            geom_shock,
+            propellant_key=args.propellant,
+            chamber_pressure_mpa=1.0,
+            ambient_pressure_kpa=380.0,
+            flux_scheme="hllc",
+            limiter=args.limiter,
+        )
+        sod_first = solve_sod_shock_tube(nx=200, flux_scheme="rusanov", limiter="first_order")
+        sod_hllc = solve_sod_shock_tube(nx=200, flux_scheme="hllc", limiter=args.limiter)
+        gci = run_grid_convergence_study(
+            propellant_key=args.propellant,
+            chamber_pressure_mpa=args.chamber_pressure_mpa,
+            ambient_pressure_kpa=args.ambient_pressure_kpa,
+            expansion_ratio=args.expansion_ratio,
+            throat_radius_m=args.throat_radius_m,
+            flux_scheme="hllc",
+            limiter=args.limiter,
+            grid_sizes=(81, 161, 321),
+        )
         trade = run_propellant_trade_study(
             chamber_pressure_mpa=args.chamber_pressure_mpa,
             ambient_pressure_kpa=args.ambient_pressure_kpa,
@@ -142,7 +193,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         vtk_p = export_plume_vtk(plume, out_dir / "nozzle_plume_field.vtk")
         shock_png = generate_shock_cfd_plot(
-            geom_shock, cfd, cfd_shock, cooling, out_dir / "nozzle_shock_cfd_analysis.png"
+            geom_shock, cfd_mac, cfd_shock, cooling, out_dir / "nozzle_shock_cfd_analysis.png"
+        )
+        fvm_png = generate_fvm_riemann_plot(
+            sod_first, sod_hllc, cfd_shock, fvm_shock, gci, out_dir / "fvm_riemann_validation.png"
         )
         trade_png = generate_propellant_trade_plot(
             trade, out_dir / "multi_propellant_trade_study.png"
@@ -152,6 +206,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         report = {
             "performance": perf.to_dict(),
             "cfd_design": {
+                "solver": getattr(cfd, "flux_scheme", "maccormack"),
+                "backend": getattr(cfd, "solver_backend", "python_numpy"),
+                "solve_ms": getattr(cfd, "solve_ms", None),
                 "flow_regime": cfd.flow_regime,
                 "iterations": cfd.iterations,
                 "converged": cfd.converged,
@@ -161,16 +218,38 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "mass_conservation_error_pct": cfd.mass_conservation_error_pct,
             },
             "cfd_in_nozzle_shock_benchmark": {
-                "flow_regime": cfd_shock.flow_regime,
-                "iterations": cfd_shock.iterations,
-                "converged": cfd_shock.converged,
-                "shock_detected": cfd_shock.shock_detected,
-                "shock_x_m": cfd_shock.shock_x_m,
-                "shock_area_ratio": cfd_shock.shock_area_ratio,
-                "shock_upstream_mach": cfd_shock.shock_upstream_mach,
-                "shock_downstream_mach": cfd_shock.shock_downstream_mach,
-                "mach_l2_error_pct": cfd_shock.mach_l2_error_pct,
+                "maccormack": {
+                    "flow_regime": cfd_shock.flow_regime,
+                    "iterations": cfd_shock.iterations,
+                    "converged": cfd_shock.converged,
+                    "shock_detected": cfd_shock.shock_detected,
+                    "shock_x_m": cfd_shock.shock_x_m,
+                    "shock_area_ratio": cfd_shock.shock_area_ratio,
+                    "shock_upstream_mach": cfd_shock.shock_upstream_mach,
+                    "shock_downstream_mach": cfd_shock.shock_downstream_mach,
+                    "mach_l2_error_pct": cfd_shock.mach_l2_error_pct,
+                },
+                "fvm_hllc_muscl": {
+                    "backend": fvm_shock.solver_backend,
+                    "solve_ms": fvm_shock.solve_ms,
+                    "flow_regime": fvm_shock.flow_regime,
+                    "iterations": fvm_shock.iterations,
+                    "converged": fvm_shock.converged,
+                    "shock_detected": fvm_shock.shock_detected,
+                    "shock_x_m": fvm_shock.shock_x_m,
+                    "shock_upstream_mach": fvm_shock.shock_upstream_mach,
+                    "shock_downstream_mach": fvm_shock.shock_downstream_mach,
+                    "mach_l2_error_pct": fvm_shock.mach_l2_error_pct,
+                    "mass_conservation_error_pct": fvm_shock.mass_conservation_error_pct,
+                },
             },
+            "sod_shock_tube_benchmark": {
+                "first_order_rusanov_rho_l1": sod_first.rho_l1_error,
+                "muscl_hllc_rho_l1": sod_hllc.rho_l1_error,
+                "muscl_hllc_rho_l2": sod_hllc.rho_l2_error,
+                "muscl_hllc_p_l2": sod_hllc.p_l2_error,
+            },
+            "grid_convergence_gci": gci.to_dict(),
             "cooling": {
                 "material": cooling.wall_material,
                 "peak_heat_flux_mw_m2": cooling.peak_heat_flux_mw_m2,
@@ -190,7 +269,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         }
         report_path = out_dir / "nozzle_cfd_benchmark_report.json"
         report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
-        artifacts = [str(p) for p in (vtk_p, shock_png, trade_png, plume_png, report_path)]
+        artifacts = [str(p) for p in (vtk_p, shock_png, fvm_png, trade_png, plume_png, report_path)]
 
     summary = {
         "performance": perf.to_dict(),
