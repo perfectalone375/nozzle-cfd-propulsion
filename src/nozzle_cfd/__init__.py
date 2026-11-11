@@ -22,26 +22,42 @@ from nozzle_cfd.propellants import (
     mach_from_area_ratio,
     run_propellant_trade_study,
 )
+from nozzle_cfd.riemann_fvm import (
+    GridConvergenceResult,
+    NozzleFVMResult,
+    SodShockTubeResult,
+    exact_sod_shock_tube,
+    run_grid_convergence_study,
+    solve_quasi1d_fvm,
+    solve_sod_shock_tube,
+)
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "G0",
     "PROPELLANTS",
     "WALL_MATERIALS",
     "CoolingAnalysisResult",
+    "GridConvergenceResult",
     "NozzleCFDResult",
+    "NozzleFVMResult",
     "NozzleGeometry",
     "NozzleWallMaterial",
     "Plume2DResult",
     "PropellantPerformance",
     "PropellantSpec",
+    "SodShockTubeResult",
     "analyze_bartz_cooling",
     "build_rao_bell_nozzle",
     "evaluate_propellant_performance",
     "exact_quasi1d_shock_solution",
+    "exact_sod_shock_tube",
     "mach_from_area_ratio",
+    "run_grid_convergence_study",
     "run_propellant_trade_study",
     "simulate_2d_nozzle_and_plume",
+    "solve_quasi1d_fvm",
     "solve_quasi1d_maccormack",
+    "solve_sod_shock_tube",
 ]

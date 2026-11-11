@@ -15,19 +15,24 @@ A production-verified **Multi-Propellant Rocket Propulsion & Supersonic Nozzle C
 ```mermaid
 flowchart LR
     P["Propellant Thermochemistry\nHydrolox | Methalox | Kerolox | APCP"] --> G["Rao Parabolic Bell Geometry\nC1 Contour & Throat Arc"]
-    G --> CFD["Conservative MacCormack CFD\nPython + C++17 + MATLAB/Octave\n(Jameson Shock Capturing)"]
-    CFD --> VAL["Exact Rankine-Hugoniot\nV&V Comparator (<0.2% L2 Design)"]
+    G --> CFD["Finite-Volume HLLC+ / AUSM+ & MacCormack\nMUSCL-TVD (Van Leer/Superbee) • C++20 DLL + MATLAB + Python"]
+    CFD --> VAL["Sod Shock Tube, Rankine-Hugoniot &\nASME V&V 20 Roache GCI (0.24% Shock L2)"]
     CFD --> MOC["2D MOC Characteristic Net &\nSupersonic Plume Shock Diamonds"]
     CFD --> THERM["Bartz Convective Heat Flux &\nGRCop-42 / CuCrZr / Inconel Cooling"]
     MOC --> VTK["ParaView .VTK + Matplotlib\n& Interactive HTML5 Mission UI"]
-    CFD --> MCP["JSON-RPC 2.0 MCP Server\n(nozzle-cfd-mcp)"]
+    CFD --> MCP["JSON-RPC 2.0 MCP Server\n(6 Tools: nozzle-cfd-mcp)"]
 ```
 
 ---
 
 ## Visual Verification Results
 
-### 1. Shock-Capturing MacCormack CFD & Bartz Nozzle Thermal Load
+### 1. Finite-Volume HLLC+ Riemann Solver, Sod Shock Tube & Roache GCI (Step 1)
+Compares **HLLC+ / AUSM+ MUSCL-TVD (`van_leer`, `superbee`)** against 1st-Order Rusanov on Toro's exact **Sod Shock Tube** (`L1 = 0.0029` vs `0.0183`), cuts in-nozzle normal-shock $L_2$ error **10×** (`0.24%` vs MacCormack's `2.51%`), and proves mesh independence across `81 → 161 → 321` grids (**`p_obs = 2.16`**, **`GCI_fine = 0.025%`**).
+
+![Finite-Volume HLLC+ & GCI Validation](deliverables/fvm_riemann_validation.png)
+
+### 2. Shock-Capturing MacCormack CFD & Bartz Nozzle Thermal Load
 Compares smooth design supersonic expansion against an off-design overexpanded case forcing a **standing normal shock wave inside the bell**, alongside Bartz convective throat heat flux and **GRCop-42** regenerative liner wall temperature margin.
 
 ![Nozzle Shock CFD & Bartz Analysis](deliverables/nozzle_shock_cfd_analysis.png)
@@ -48,9 +53,9 @@ Method-of-Characteristics (MOC) internal wave rays paired with 2D supersonic Mac
 
 | Implementation | Directory / File | Highlight | Verified By |
 | :--- | :--- | :--- | :--- |
-| **Python 3.10–3.12** | [`src/nozzle_cfd/`](src/nozzle_cfd/) | Full thermochemistry, Rao bell, MacCormack shock CFD, 2D MOC plume, Bartz cooling, `.vtk` + Matplotlib charts, CLI & MCP server | `pytest` + `ruff` |
-| **MATLAB / Octave** | [`matlab/`](matlab/) | Self-contained `.m` solvers: [`solve_nozzle_cfd_maccormack.m`](matlab/solve_nozzle_cfd_maccormack.m), [`propellant_trade_study.m`](matlab/propellant_trade_study.m), [`moc_minimum_length_nozzle.m`](matlab/moc_minimum_length_nozzle.m) | `octave --no-gui` in CI |
-| **C++17 (`g++ -O3`)** | [`cpp/maccormack_cfd.cpp`](cpp/maccormack_cfd.cpp) | Zero-dependency high-speed conservative solver with millisecond timing & JSON telemetry (`make test`) | `g++ -O3` in CI & Docker |
+| **Python 3.10–3.12** | [`src/nozzle_cfd/`](src/nozzle_cfd/) | Finite-Volume **HLLC+ / AUSM+ MUSCL-TVD**, Sod benchmark, **ASME V&V 20 GCI**, MacCormack, Bartz cooling, `.vtk` & MCP server | `pytest` + `ruff` |
+| **MATLAB / Octave** | [`matlab/`](matlab/) | [`solve_nozzle_hllc_fvm.m`](matlab/solve_nozzle_hllc_fvm.m), [`solve_nozzle_cfd_maccormack.m`](matlab/solve_nozzle_cfd_maccormack.m), [`propellant_trade_study.m`](matlab/propellant_trade_study.m), [`moc_minimum_length_nozzle.m`](matlab/moc_minimum_length_nozzle.m) | `octave --no-gui` in CI |
+| **C++20 (`g++ -O3`)** | [`cpp/`](cpp/) | [`hllc_fvm_solver.cpp`](cpp/hllc_fvm_solver.cpp) (`nozzle_fvm_core.dll`/`.so` Python accelerator + CLI) & [`maccormack_cfd.cpp`](cpp/maccormack_cfd.cpp) | `g++ -O3` in CI & local |
 
 ---
 

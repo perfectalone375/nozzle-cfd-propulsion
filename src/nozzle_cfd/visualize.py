@@ -15,6 +15,7 @@ from nozzle_cfd.cooling import CoolingAnalysisResult
 from nozzle_cfd.geometry import NozzleGeometry
 from nozzle_cfd.moc_2d import Plume2DResult
 from nozzle_cfd.propellants import PropellantPerformance
+from nozzle_cfd.riemann_fvm import GridConvergenceResult, NozzleFVMResult, SodShockTubeResult
 
 
 def export_plume_vtk(plume: Plume2DResult, output_path: str | Path) -> Path:
@@ -364,6 +365,196 @@ def generate_2d_plume_plot(
     ax.legend(loc="upper left", fontsize=8.5)
 
     plt.tight_layout()
+    fig.savefig(out, facecolor=fig.get_facecolor())
+    plt.close(fig)
+    return out
+
+
+def generate_fvm_riemann_plot(
+    sod_first: SodShockTubeResult,
+    sod_hllc: SodShockTubeResult,
+    mac_shock: NozzleCFDResult,
+    fvm_shock: NozzleFVMResult,
+    gci: GridConvergenceResult,
+    output_path: str | Path,
+) -> Path:
+    """Create a 2x2 beginner-friendly FVM Riemann + GCI verification comparison figure."""
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    plt.style.use("dark_background")
+    fig, axes = plt.subplots(2, 2, figsize=(14, 9.5), dpi=180)
+    fig.patch.set_facecolor("#0b1120")
+
+    # 1. Sod Shock Tube: Why HLLC + Van Leer MUSCL beats 1st-Order Rusanov
+    ax1 = axes[0, 0]
+    ax1.set_facecolor("#111827")
+    ax1.plot(sod_hllc.x, sod_hllc.rho_exact, color="#f8fafc", lw=2.2, label="Toro Exact Analytical")
+    ax1.plot(
+        sod_first.x,
+        sod_first.rho_num,
+        color="#f59e0b",
+        ls="--",
+        lw=1.7,
+        label=f"1st-Order Rusanov (L1={sod_first.rho_l1_error:.4f})",
+    )
+    ax1.plot(
+        sod_hllc.x,
+        sod_hllc.rho_num,
+        color="#22d3ee",
+        lw=2.2,
+        label=f"MUSCL HLLC+ ({sod_hllc.limiter}, L1={sod_hllc.rho_l1_error:.4f})",
+    )
+    ax1.annotate(
+        "Contact Wave\n(HLLC keeps crisp jump)",
+        xy=(0.685, 0.42),
+        xytext=(0.71, 0.72),
+        arrowprops={"arrowstyle": "->", "color": "#22d3ee", "lw": 1.2},
+        fontsize=8,
+        color="#a5f3fc",
+    )
+    ax1.set_title(
+        "1. NASA Sod Shock Tube Riemann Benchmark (Density)",
+        fontsize=11,
+        fontweight="bold",
+        color="#f8fafc",
+    )
+    ax1.set_xlabel("Tube Position x [-]")
+    ax1.set_ylabel("Nondimensional Density rho [-]")
+    ax1.legend(loc="upper right", fontsize=8)
+    ax1.grid(alpha=0.2)
+
+    # 2. Nozzle Standing Normal Shock: MacCormack vs HLLC+ MUSCL-TVD
+    ax2 = axes[0, 1]
+    ax2.set_facecolor("#111827")
+    ax2.plot(
+        fvm_shock.x_m,
+        fvm_shock.analytical_mach,
+        color="#f8fafc",
+        ls=":",
+        lw=1.8,
+        label="Exact Rankine-Hugoniot Truth",
+    )
+    ax2.plot(
+        mac_shock.x_m,
+        mac_shock.mach,
+        color="#fb7185",
+        lw=1.8,
+        alpha=0.9,
+        label=f"1969 MacCormack FD (L2={mac_shock.mach_l2_error_pct:.2f}%)",
+    )
+    ax2.plot(
+        fvm_shock.x_m,
+        fvm_shock.mach,
+        color="#34d399",
+        lw=2.3,
+        label=f"HLLC+ MUSCL-TVD FVM (L2={fvm_shock.mach_l2_error_pct:.2f}%)",
+    )
+    ax2.axhline(1.0, color="#fbbf24", ls="-.", lw=1.0, alpha=0.65)
+    ax2.set_title(
+        "2. Standing Normal Shock Crispness (FD vs Finite-Volume)",
+        fontsize=11,
+        fontweight="bold",
+        color="#f8fafc",
+    )
+    ax2.set_xlabel("Nozzle Axial Position x [m]")
+    ax2.set_ylabel("Mach Number M [-]")
+    ax2.legend(loc="upper right", fontsize=8)
+    ax2.grid(alpha=0.2)
+
+    # 3. ASME V&V 20 Grid Convergence Index (Log-Log Slope)
+    ax3 = axes[1, 0]
+    ax3.set_facecolor("#111827")
+    nx_arr = np.asarray(gci.grid_sizes, dtype=float)
+    h_rel = nx_arr[0] / nx_arr
+    ax3.loglog(
+        h_rel,
+        gci.mach_l2_errors_pct,
+        marker="o",
+        color="#38bdf8",
+        lw=2.3,
+        label=f"Mach L2 Error (p_obs={gci.observed_order_error:.2f})",
+    )
+    ax3.loglog(
+        h_rel,
+        gci.pressure_l2_errors_pct,
+        marker="s",
+        color="#a78bfa",
+        lw=2.0,
+        label="Pressure L2 Error",
+    )
+    ref_2nd = gci.mach_l2_errors_pct[0] * (h_rel**2)
+    ax3.loglog(h_rel, ref_2nd, color="#94a3b8", ls="--", lw=1.3, label="Ideal 2nd-Order Slope (-2)")
+    for idx_pt, (hx, err, nx_lbl) in enumerate(
+        zip(h_rel, gci.mach_l2_errors_pct, gci.grid_sizes, strict=True)
+    ):
+        if idx_pt == 0:
+            x_off, y_off = 8, -18
+        elif idx_pt == len(h_rel) - 1:
+            x_off, y_off = -46, 12
+        else:
+            x_off, y_off = 8, -14
+        ax3.annotate(
+            f"N={nx_lbl}\n{err:.3f}%",
+            (hx, err),
+            xytext=(x_off, y_off),
+            textcoords="offset points",
+            fontsize=8,
+        )
+    ax3.invert_xaxis()
+    ax3.set_xlim(h_rel[0] * 1.15, h_rel[-1] * 0.82)
+    ax3.set_title(
+        f"3. Roache GCI Mesh Refinement (GCI_fine={gci.gci_fine_pct:.3f}%)",
+        fontsize=11,
+        fontweight="bold",
+        color="#f8fafc",
+    )
+    ax3.set_xlabel("Normalized Cell Size h/h_coarse (finer ->)")
+    ax3.set_ylabel("Discretization L2 Error [%]")
+    ax3.legend(loc="lower left", fontsize=8)
+    ax3.grid(alpha=0.2, which="both")
+
+    # 4. Iterative Residual Convergence History (MacCormack vs HLLC+ MUSCL-TVD)
+    ax4 = axes[1, 1]
+    ax4.set_facecolor("#111827")
+    if mac_shock.residual_history:
+        it_mac = np.arange(len(mac_shock.residual_history)) * 50 + 1
+        ax4.semilogy(
+            it_mac,
+            mac_shock.residual_history,
+            color="#fb7185",
+            lw=1.8,
+            label=f"MacCormack FD (conv={mac_shock.converged}, iters={mac_shock.iterations})",
+        )
+    if fvm_shock.residual_history:
+        it_fvm = np.arange(len(fvm_shock.residual_history)) * 50 + 1
+        ax4.semilogy(
+            it_fvm,
+            fvm_shock.residual_history,
+            color="#34d399",
+            lw=2.1,
+            label=f"HLLC+ MUSCL-TVD (conv={fvm_shock.converged}, iters={fvm_shock.iterations})",
+        )
+    ax4.axhline(1e-6, color="#fbbf24", ls="--", lw=1.1, label="Convergence Tolerance (1e-6)")
+    ax4.set_title(
+        f"4. Residual Convergence ({fvm_shock.solver_backend}: {fvm_shock.solve_ms:.1f} ms)",
+        fontsize=11,
+        fontweight="bold",
+        color="#f8fafc",
+    )
+    ax4.set_xlabel("Iteration Count [-]")
+    ax4.set_ylabel("Max Normalized Momentum Residual [-]")
+    ax4.legend(loc="upper right", fontsize=8)
+    ax4.grid(alpha=0.2, which="both")
+
+    fig.suptitle(
+        "Step 1 Validation: Finite-Volume HLLC+ Riemann Solver, MUSCL-TVD & ASME V&V 20 GCI",
+        fontsize=13.5,
+        fontweight="bold",
+        color="#f8fafc",
+        y=0.98,
+    )
+    plt.tight_layout(rect=(0.0, 0.0, 1.0, 0.95))
     fig.savefig(out, facecolor=fig.get_facecolor())
     plt.close(fig)
     return out

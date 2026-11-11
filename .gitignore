@@ -14,13 +14,17 @@ dist/
 venv/
 env/
 
-# Compiled C++ binaries & objects
+# Compiled C++ binaries, shared libraries & objects
 *.o
 *.obj
 *.exe
 *.out
+*.dll
+*.so
+*.dylib
 cpp/build/
 cpp/maccormack_cfd
+cpp/hllc_fvm_cfd
 
 # MATLAB/Octave temp files
 octave-workspace
