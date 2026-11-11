@@ -1,0 +1,16 @@
+* text=auto
+*.py text eol=lf
+*.cpp text eol=lf
+*.h text eol=lf
+*.m text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.toml text eol=lf
+*.json text eol=lf
+*.vts text eol=lf
+*.vtk text eol=lf
+Makefile text eol=lf
+Dockerfile text eol=lf
+*.png binary
+*.pdf binary
