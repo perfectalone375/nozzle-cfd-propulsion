@@ -25,6 +25,7 @@ env/
 cpp/build/
 cpp/maccormack_cfd
 cpp/hllc_fvm_cfd
+cpp/axisymmetric_ns2d
 
 # MATLAB/Octave temp files
 octave-workspace

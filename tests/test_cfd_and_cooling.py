@@ -113,7 +113,7 @@ def test_cli_export_all_and_mcp_jsonrpc(tmp_path: Path, capsys: object) -> None:
 
     tools_resp = handle_jsonrpc_request({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
     assert tools_resp is not None
-    assert len(tools_resp["result"]["tools"]) == 6
+    assert len(tools_resp["result"]["tools"]) == 7
 
     call_resp = handle_jsonrpc_request(
         {

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import matplotlib
 
@@ -550,6 +551,190 @@ def generate_fvm_riemann_plot(
     fig.suptitle(
         "Step 1 Validation: Finite-Volume HLLC+ Riemann Solver, MUSCL-TVD & ASME V&V 20 GCI",
         fontsize=13.5,
+        fontweight="bold",
+        color="#f8fafc",
+        y=0.98,
+    )
+    plt.tight_layout(rect=(0.0, 0.0, 1.0, 0.95))
+    fig.savefig(out, facecolor=fig.get_facecolor())
+    plt.close(fig)
+    return out
+
+
+def generate_2d_ns_schlieren_plot(
+    ns2d_plume: Any,
+    ns2d_jpl: Any,
+    ns2d_sep: Any,
+    output_path: str | Path,
+) -> Path:
+    """Create a 2x2 showcase validating true 2D Axisymmetric Navier-Stokes & Numerical Schlieren."""
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    plt.style.use("dark_background")
+    fig, axes = plt.subplots(2, 2, figsize=(15, 9.6), dpi=180)
+    fig.patch.set_facecolor("#0b1120")
+
+    def _plot_mirrored_blocks(
+        ax: Any, res: Any, field1: np.ndarray, field2: np.ndarray | None, **kw: Any
+    ) -> Any:
+        mesh_top_1 = ax.pcolormesh(res.x1_v, res.r1_v, field1, shading="flat", **kw)
+        ax.pcolormesh(res.x1_v, -res.r1_v, field1, shading="flat", **kw)
+        if res.x2_v is not None and field2 is not None:
+            ax.pcolormesh(res.x2_v, res.r2_v, field2, shading="flat", **kw)
+            ax.pcolormesh(res.x2_v, -res.r2_v, field2, shading="flat", **kw)
+        return mesh_top_1
+
+    # 1. 2D Axisymmetric Mach Contours + Curved Sonic Line (Rao Nozzle + Coupled Plume)
+    ax1 = axes[0, 0]
+    ax1.set_facecolor("#020617")
+    vmax_m = float(
+        max(
+            3.5,
+            np.nanmax(ns2d_plume.mach_1),
+            np.nanmax(ns2d_plume.mach_2) if ns2d_plume.mach_2 is not None else 3.5,
+        )
+    )
+    mappable1 = _plot_mirrored_blocks(
+        ax1,
+        ns2d_plume,
+        ns2d_plume.mach_1,
+        ns2d_plume.mach_2,
+        cmap="turbo",
+        vmin=0.0,
+        vmax=vmax_m,
+    )
+    # Nozzle physical walls & curved M=1 sonic line
+    wx = ns2d_plume.x1_v[:, -1]
+    wr = ns2d_plume.r1_v[:, -1]
+    ax1.plot(wx, wr, color="#f8fafc", lw=2.2)
+    ax1.plot(wx, -wr, color="#f8fafc", lw=2.2)
+    sx = np.concatenate([ns2d_plume.sonic_line_x_m[::-1], ns2d_plume.sonic_line_x_m])
+    sr = np.concatenate([-ns2d_plume.sonic_line_r_m[::-1], ns2d_plume.sonic_line_r_m])
+    ax1.plot(sx, sr, color="#ffffff", ls="--", lw=1.6, label="Curved Sonic Line (M=1.0)")
+    cb1 = fig.colorbar(mappable1, ax=ax1, pad=0.02, aspect=26)
+    cb1.set_label("Local Mach Number M [-]", fontsize=8.5)
+    ax1.set_title(
+        f"1. 2D Axisymmetric Mach Field ({ns2d_plume.solver_backend}, "
+        f"{ns2d_plume.solve_ms:.0f} ms, err={ns2d_plume.mass_conservation_error_pct:.3f}%)",
+        fontsize=10.5,
+        fontweight="bold",
+        color="#f8fafc",
+    )
+    ax1.set_xlabel("Axial Position x [m]")
+    ax1.set_ylabel("Radial Position r [m]")
+    ax1.legend(loc="upper right", fontsize=8)
+
+    # 2. Optical Numerical Schlieren |grad(rho)|
+    ax2 = axes[0, 1]
+    ax2.set_facecolor("#e2e8f0")
+    s1 = ns2d_plume.schlieren_1
+    s2 = ns2d_plume.schlieren_2
+    s_ref = float(np.percentile(s2 if s2 is not None else s1, 97) + 1e-6)
+    sch_1_img = np.log1p(5.0 * s1 / s_ref)
+    sch_2_img = np.log1p(5.0 * s2 / s_ref) if s2 is not None else None
+    vmax_s = float(np.percentile(sch_2_img if sch_2_img is not None else sch_1_img, 99.5))
+    mappable2 = _plot_mirrored_blocks(
+        ax2,
+        ns2d_plume,
+        sch_1_img,
+        sch_2_img,
+        cmap="gray_r",
+        vmin=0.0,
+        vmax=max(0.5, vmax_s),
+    )
+    ax2.plot(wx, wr, color="#0f172a", lw=2.5)
+    ax2.plot(wx, -wr, color="#0f172a", lw=2.5)
+    cb2 = fig.colorbar(mappable2, ax=ax2, pad=0.02, aspect=26)
+    cb2.set_label("Log Density Gradient ln(1 + 5|grad rho|/ref)", fontsize=8.5)
+    ax2.set_title(
+        "2. Numerical Schlieren: Oblique Nozzle Wave & Plume Shock Diamonds",
+        fontsize=10.5,
+        fontweight="bold",
+        color="#f8fafc",
+    )
+    ax2.set_xlabel("Axial Position x [m]")
+    ax2.set_ylabel("Radial Position r [m]")
+
+    # 3. JPL 45-15 Transonic Throat Validation: Wall vs Centerline Acceleration
+    ax3 = axes[1, 0]
+    ax3.set_facecolor("#111827")
+    xj = ns2d_jpl.x1_c[:, 0]
+    m_cl = ns2d_jpl.mach_1[:, 0]
+    m_wl = ns2d_jpl.mach_1[:, -1]
+    i_th_j = int(np.argmin(ns2d_jpl.r1_v[:, -1]))
+    x_th_j = float(ns2d_jpl.x1_v[i_th_j, -1])
+    ax3.plot(xj, m_cl, color="#38bdf8", lw=2.2, label="Centerline Mach M(x, r=0)")
+    ax3.plot(xj, m_wl, color="#fb923c", lw=2.2, label="Wall Mach M(x, r=R_wall)")
+    ax3.axvline(
+        x_th_j,
+        color="#e2e8f0",
+        ls=":",
+        lw=1.2,
+        label=f"Geometric Throat (Cd={ns2d_jpl.discharge_coefficient_cd:.4f})",
+    )
+    ax3.axhline(1.0, color="#fbbf24", ls="--", lw=1.1, alpha=0.8)
+    ax3.annotate(
+        f"Curved Sonic Line Shift\n(CL lags wall by {ns2d_jpl.sonic_line_offset_mm:.1f} mm)",
+        xy=(x_th_j, float(m_wl[min(len(m_wl) - 1, i_th_j)])),
+        xytext=(max(0.01, x_th_j - 0.055), 2.15),
+        arrowprops={"arrowstyle": "->", "color": "#fb923c", "lw": 1.3},
+        fontsize=8,
+        color="#fed7aa",
+    )
+    ax3.set_title(
+        "3. JPL 45-15 (rc/rt=0.625) 2D Transonic Throat Overshoot",
+        fontsize=10.5,
+        fontweight="bold",
+        color="#f8fafc",
+    )
+    ax3.set_xlabel("Axial Position x [m]")
+    ax3.set_ylabel("Mach Number M [-]")
+    ax3.legend(loc="upper left", fontsize=8)
+    ax3.grid(alpha=0.2)
+
+    # 4. Viscous Navier-Stokes Boundary-Layer Shock-Induced Separation
+    ax4 = axes[1, 1]
+    ax4.set_facecolor("#111827")
+    xs = ns2d_sep.x1_c[:, -1]
+    u_wall = ns2d_sep.u_1[:, -1]
+    u_core = ns2d_sep.u_1[:, 0]
+    ax4.plot(xs, u_core, color="#34d399", lw=2.0, label="Supersonic Core Velocity u(x, r=0)")
+    ax4.plot(
+        xs, u_wall, color="#fb7185", lw=2.2, label="Near-Wall Turbulent BL Velocity u(x, wall)"
+    )
+    ax4.axhline(0.0, color="#fbbf24", ls="--", lw=1.1)
+    ax4.fill_between(
+        xs,
+        u_wall,
+        0.0,
+        where=(u_wall < 0.0),
+        color="#f43f5e",
+        alpha=0.35,
+        label="Reverse Flow Separation Bubble (u < 0)",
+    )
+    if ns2d_sep.separation_x_m is not None:
+        ax4.axvline(
+            ns2d_sep.separation_x_m,
+            color="#fda4af",
+            ls=":",
+            lw=1.5,
+            label=f"Separation Point x_sep={ns2d_sep.separation_x_m:.3f} m",
+        )
+    ax4.set_title(
+        f"4. Viscous Turbulent BL & Separation (u_min={np.min(u_wall):.1f} m/s)",
+        fontsize=10.2,
+        fontweight="bold",
+        color="#f8fafc",
+    )
+    ax4.set_xlabel("Nozzle Axial Position x [m]")
+    ax4.set_ylabel("Axial Velocity u [m/s]")
+    ax4.legend(loc="lower left", fontsize=8)
+    ax4.grid(alpha=0.2)
+
+    fig.suptitle(
+        "Step 2 Validation: 2D Axisymmetric Navier-Stokes, Schlieren & Transonic Separation",
+        fontsize=13.2,
         fontweight="bold",
         color="#f8fafc",
         y=0.98,

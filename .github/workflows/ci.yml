@@ -62,9 +62,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends octave
 
-      - name: Execute MATLAB/Octave MacCormack, HLLC FVM, Trade Study & 2D MOC Scripts
+      - name: Execute MATLAB/Octave MacCormack, HLLC FVM, 2D Axisymmetric FVM, Trade Study & 2D MOC Scripts
         run: |
           octave --no-gui matlab/solve_nozzle_cfd_maccormack.m
           octave --no-gui matlab/solve_nozzle_hllc_fvm.m
+          octave --no-gui matlab/solve_nozzle_ns2d_fvm.m
           octave --no-gui matlab/propellant_trade_study.m
           octave --no-gui matlab/moc_minimum_length_nozzle.m
